@@ -1,7 +1,7 @@
 """Gemma 4 Code Review Agent — Streamlit UI."""
 
 import streamlit as st
-from reviewer import review_repo, RepoReview, FileReview
+from reviewer import review_repo, RepoReview, FileReview, section_is_clean
 
 st.set_page_config(page_title="Gemma 4 Code Reviewer", page_icon="🔍", layout="wide")
 
@@ -44,7 +44,18 @@ if run and source:
                 f"**Reviewing file {current + 1} of {total}:** `{filename}`"
             )
 
-    result: RepoReview = review_repo(source, max_files=max_files, on_progress=on_progress)
+    try:
+        result: RepoReview = review_repo(source, max_files=max_files, on_progress=on_progress)
+    except ValueError as e:
+        progress_bar.empty()
+        status_text.empty()
+        st.error(f"**Invalid input:** {e}")
+        st.stop()
+    except Exception as e:
+        progress_bar.empty()
+        status_text.empty()
+        st.error(f"**Review failed:** {e}")
+        st.stop()
 
     progress_bar.progress(1.0)
     status_text.markdown("**Review complete!**")
@@ -72,9 +83,9 @@ for fr in reviewed:
                 break
         except ValueError:
             continue
-    if fr.security and "none found" not in fr.security.lower():
+    if not section_is_clean(fr.security):
         security_count += 1
-    if fr.bugs and "none found" not in fr.bugs.lower():
+    if not section_is_clean(fr.bugs):
         bug_count += 1
 
 avg_score = sum(scores) / len(scores) if scores else 0
@@ -96,9 +107,9 @@ tab_overview, tab_security, tab_bugs, tab_style, tab_perf, tab_raw = st.tabs(
 def _file_icon(fr: FileReview) -> str:
     if fr.error:
         return "❌"
-    if fr.security and "none found" not in fr.security.lower():
+    if not section_is_clean(fr.security):
         return "🔴"
-    if fr.bugs and "none found" not in fr.bugs.lower():
+    if not section_is_clean(fr.bugs):
         return "🟡"
     return "🟢"
 
@@ -124,7 +135,7 @@ def _render_section(tab, attr: str, empty_msg: str):
         found_any = False
         for fr in reviewed:
             text = getattr(fr, attr, "")
-            if text and "none found" not in text.lower():
+            if not section_is_clean(text):
                 found_any = True
                 st.markdown(f"### `{fr.filename}`")
                 st.markdown(text)

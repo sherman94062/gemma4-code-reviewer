@@ -1,6 +1,6 @@
 """Core review engine — clones repos and reviews code with Gemma 4 via Ollama."""
 
-import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -10,6 +10,17 @@ import ollama
 from git import Repo
 
 MODEL = "gemma4:26b"
+
+# Patterns that indicate a section has no findings — LLMs vary their phrasing.
+_CLEAN_PATTERNS = re.compile(
+    r"none\s*found|no\s+(issues?|concerns?|problems?|bugs?|errors?)\s*(found|detected|identified|noted)?",
+    re.IGNORECASE,
+)
+
+# Directories a local-path review must live under (empty = allow all).
+# Reject clearly sensitive system paths.
+_BLOCKED_PATHS = ("/etc", "/private/etc", "/var", "/private/var", "/System")
+_BLOCKED_HOME_DIRS = (".ssh", ".gnupg", ".aws", ".config/gcloud")
 
 SUPPORTED_EXTENSIONS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java",
@@ -73,6 +84,44 @@ class RepoReview:
     files_skipped: list[str] = field(default_factory=list)
 
 
+def section_is_clean(text: str) -> bool:
+    """Return True if a review section indicates no findings."""
+    if not text:
+        return True
+    return bool(_CLEAN_PATTERNS.search(text))
+
+
+def validate_source(source: str) -> str | None:
+    """Return an error message if source is unsafe, else None."""
+    if source.startswith(("http://", "https://")) or source.endswith(".git"):
+        # Only allow well-formed GitHub/GitLab-style URLs
+        if not re.match(r"https?://[\w.\-]+/[\w.\-/]+(?:\.git)?$", source):
+            return "URL looks malformed. Please provide a standard Git repository URL."
+        return None
+
+    # Local path validation
+    resolved = Path(source).expanduser().resolve()
+    path_str = str(resolved)
+
+    for blocked in _BLOCKED_PATHS:
+        if path_str.startswith(blocked):
+            return f"Refusing to review system path: {blocked}"
+
+    home = Path.home()
+    try:
+        rel = resolved.relative_to(home)
+        for blocked_dir in _BLOCKED_HOME_DIRS:
+            if str(rel).startswith(blocked_dir):
+                return f"Refusing to review sensitive directory: ~/{blocked_dir}"
+    except ValueError:
+        pass  # not under home — already checked _BLOCKED_PATHS
+
+    if not resolved.is_dir():
+        return f"Path does not exist or is not a directory: {source}"
+
+    return None
+
+
 def language_from_ext(ext: str) -> str:
     mapping = {
         ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
@@ -110,37 +159,53 @@ def collect_files(root: Path) -> tuple[list[Path], list[str]]:
 def clone_repo(url: str) -> Path:
     """Clone a git repo to a temp directory and return the path."""
     tmp = Path(tempfile.mkdtemp(prefix="gemma4_review_"))
-    Repo.clone_from(url, str(tmp))
+    try:
+        Repo.clone_from(url, str(tmp))
+    except Exception:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     return tmp
 
 
 def parse_review(raw: str) -> dict:
-    """Parse the structured review response into sections."""
+    """Parse the structured review response into sections.
+
+    Handles varying markdown heading levels (##, ###, ####) and common
+    phrasing variations from the LLM.
+    """
     sections = {
         "summary": "", "security": "", "bugs": "",
         "style": "", "performance": "", "score": "",
     }
-    heading_map = {
-        "summary": "summary",
-        "security issues": "security",
-        "security": "security",
-        "bugs & logic errors": "bugs",
-        "bugs": "bugs",
-        "style & best practices": "style",
-        "style": "style",
-        "performance": "performance",
-        "score": "score",
-    }
+    # Map keywords found anywhere in a heading to a section key
+    _keyword_to_section = [
+        ("score", "score"),
+        ("security", "security"),
+        ("bug", "bugs"),
+        ("logic error", "bugs"),
+        ("style", "style"),
+        ("best practice", "style"),
+        ("performance", "performance"),
+        ("summary", "summary"),
+        ("overview", "summary"),
+    ]
     current_key = None
     for line in raw.split("\n"):
-        stripped = line.strip().lstrip("#").strip()
-        lower = stripped.lower()
-        if lower in heading_map:
-            current_key = heading_map[lower]
+        stripped = line.strip()
+        # Detect any markdown heading (##, ###, ####, etc.)
+        if re.match(r"^#{1,6}\s+", stripped):
+            heading_text = stripped.lstrip("#").strip().lower()
+            matched = False
+            for keyword, section in _keyword_to_section:
+                if keyword in heading_text:
+                    current_key = section
+                    matched = True
+                    break
+            if not matched:
+                current_key = None
             continue
         if current_key:
             sections[current_key] += line + "\n"
-    # trim trailing whitespace
     return {k: v.strip() for k, v in sections.items()}
 
 
@@ -182,9 +247,18 @@ def review_repo(source: str, max_files: int = 20, on_progress=None) -> RepoRevie
     Args:
         on_progress: Optional callback(current_index, total, filename) called
                      before each file review starts.
+
+    Raises:
+        ValueError: If the source fails input validation.
     """
+    error = validate_source(source)
+    if error:
+        raise ValueError(error)
+
     cleanup = False
-    if source.startswith("http://") or source.startswith("https://") or source.endswith(".git"):
+    is_remote = source.startswith(("http://", "https://")) or source.endswith(".git")
+
+    if is_remote:
         if on_progress:
             on_progress(-1, 0, "Cloning repository...")
         root = clone_repo(source)
