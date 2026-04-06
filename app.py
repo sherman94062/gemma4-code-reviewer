@@ -2,6 +2,7 @@
 
 import re
 import time
+from collections import defaultdict
 from datetime import datetime
 
 import streamlit as st
@@ -183,6 +184,12 @@ if run and source:
     st.session_state["file_timings"] = file_timings
     st.session_state["model_used"] = selected_model
 
+    # Build per-file score breakdown for comparison
+    file_scores = {}
+    for fr in result.files_reviewed:
+        s = _extract_score(fr.score)
+        file_scores[fr.filename] = s
+
     # Update history — keyed by (source, model) so re-scans replace
     display_name = source.rstrip("/").split("/")[-1]
     history_key = f"{source}||{selected_model}"
@@ -193,6 +200,9 @@ if run and source:
         "elapsed": total_elapsed,
         "avg_score": avg_for_hist,
         "files": len(result.files_reviewed),
+        "security_flags": sum(1 for fr in result.files_reviewed if not section_is_clean(fr.security)),
+        "bug_flags": sum(1 for fr in result.files_reviewed if not section_is_clean(fr.bugs)),
+        "file_scores": file_scores,
         "timestamp": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
     }
 
@@ -203,9 +213,12 @@ with history_col:
     if not history:
         st.caption("No scans yet.")
     else:
+        entries = list(reversed(list(history.values())))
+        max_rows = st.slider("Rows shown", 1, max(len(entries), 1), min(len(entries), 10), key="hist_rows")
+
         header = "| Repo | Model | Score | Time | Files | When |\n|---|---|---|---|---|---|"
         rows = []
-        for entry in reversed(list(history.values())):
+        for entry in entries[:max_rows]:
             score_icon = "🟢" if entry["avg_score"] >= 7 else "🟡" if entry["avg_score"] >= 5 else "🔴"
             rows.append(
                 f"| {entry['source']} | {entry['model']} "
@@ -214,6 +227,78 @@ with history_col:
                 f"| {entry['files']} | {entry['timestamp']} |"
             )
         st.markdown(header + "\n" + "\n".join(rows))
+
+        # ── Model comparison ────────────────────────────────────────────────
+        # Group by repo to find repos scanned with multiple models
+        repos = defaultdict(list)
+        for entry in entries:
+            repos[entry["full_source"]].append(entry)
+
+        # Only show comparison if at least one repo has multiple model runs
+        multi_model_repos = {k: v for k, v in repos.items() if len(v) > 1}
+        if multi_model_repos:
+            st.markdown("#### Model Comparison")
+            for full_source, runs in multi_model_repos.items():
+                display = runs[0]["source"]
+                st.markdown(f"**{display}**")
+
+                # Comparison table header
+                comp_header = "| Metric |"
+                comp_sep = "|---|"
+                for r in runs:
+                    comp_header += f" {r['model']} |"
+                    comp_sep += "---|"
+
+                # Score row with bar visualization
+                score_row = "| Avg Score |"
+                for r in runs:
+                    icon = "🟢" if r["avg_score"] >= 7 else "🟡" if r["avg_score"] >= 5 else "🔴"
+                    bar = "█" * int(r["avg_score"]) + "░" * (10 - int(r["avg_score"]))
+                    score_row += f" {icon} **{r['avg_score']:.1f}** `{bar}` |"
+
+                time_row = "| Time |"
+                for r in runs:
+                    time_row += f" {_format_elapsed(r['elapsed'])} |"
+
+                security_row = "| Security |"
+                for r in runs:
+                    flags = r.get("security_flags", "–")
+                    security_row += f" {flags} |"
+
+                bugs_row = "| Bugs |"
+                for r in runs:
+                    flags = r.get("bug_flags", "–")
+                    bugs_row += f" {flags} |"
+
+                st.markdown("\n".join([comp_header, comp_sep, score_row, time_row, security_row, bugs_row]))
+
+                # Per-file score comparison if available
+                all_files = set()
+                for r in runs:
+                    all_files.update(r.get("file_scores", {}).keys())
+
+                if all_files:
+                    with st.expander("Per-file scores"):
+                        file_header = "| File |"
+                        file_sep = "|---|"
+                        for r in runs:
+                            file_header += f" {r['model']} |"
+                            file_sep += "---|"
+
+                        file_rows = []
+                        for fname in sorted(all_files):
+                            row = f"| `{fname}` |"
+                            for r in runs:
+                                s = r.get("file_scores", {}).get(fname)
+                                if s is not None:
+                                    icon = "🟢" if s >= 7 else "🟡" if s >= 5 else "🔴"
+                                    row += f" {icon} {s:.0f} |"
+                                else:
+                                    row += " – |"
+                            file_rows.append(row)
+                        st.markdown("\n".join([file_header, file_sep] + file_rows))
+
+                st.divider()
 
     if history:
         if st.button("Clear History", use_container_width=True):
