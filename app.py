@@ -183,11 +183,19 @@ if run and source:
     st.session_state["file_timings"] = file_timings
     st.session_state["model_used"] = selected_model
 
-    # Build per-file score breakdown for comparison
+    # Build per-file detail breakdown for comparison and consensus
     file_scores = {}
+    file_details = {}
     for fr in result.files_reviewed:
         s = _extract_score(fr.score)
         file_scores[fr.filename] = s
+        file_details[fr.filename] = {
+            "security": fr.security,
+            "bugs": fr.bugs,
+            "style": fr.style,
+            "performance": fr.performance,
+            "summary": fr.summary,
+        }
 
     # Update history — keyed by (source, model) so re-scans replace
     display_name = source.rstrip("/").split("/")[-1]
@@ -202,6 +210,7 @@ if run and source:
         "security_flags": sum(1 for fr in result.files_reviewed if not section_is_clean(fr.security)),
         "bug_flags": sum(1 for fr in result.files_reviewed if not section_is_clean(fr.bugs)),
         "file_scores": file_scores,
+        "file_details": file_details,
         "timestamp": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
     }
 
@@ -358,9 +367,24 @@ with main_col:
     st.divider()
 
     # ── Category tabs ───────────────────────────────────────────────────────
-    tab_overview, tab_security, tab_bugs, tab_style, tab_perf, tab_raw = st.tabs(
-        ["Overview", "Security", "Bugs & Logic", "Style", "Performance", "Raw Output"]
-    )
+    # Show Consensus tab when multiple models have scanned the same repo
+    current_source = st.session_state.get("result", RepoReview("")).repo_source
+    history = st.session_state.get("history", {})
+    multi_model_runs = [
+        e for e in history.values()
+        if e["full_source"] == current_source
+    ]
+    has_consensus = len(multi_model_runs) > 1
+
+    if has_consensus:
+        tab_overview, tab_consensus, tab_security, tab_bugs, tab_style, tab_perf, tab_raw = st.tabs(
+            ["Overview", "⚖ Consensus", "Security", "Bugs & Logic", "Style", "Performance", "Raw Output"]
+        )
+    else:
+        tab_overview, tab_security, tab_bugs, tab_style, tab_perf, tab_raw = st.tabs(
+            ["Overview", "Security", "Bugs & Logic", "Style", "Performance", "Raw Output"]
+        )
+        tab_consensus = None
 
     def _file_icon(fr: FileReview) -> str:
         if fr.error:
@@ -383,6 +407,91 @@ with main_col:
         if result.files_skipped:
             with st.expander(f"Skipped files ({len(result.files_skipped)})"):
                 st.code("\n".join(result.files_skipped[:100]))
+
+    # ── Consensus tab ─────────────────────────────────────────────────────
+    if tab_consensus is not None and has_consensus:
+        with tab_consensus:
+            st.markdown(
+                "Cross-references findings from **all model runs** on this repo. "
+                "Issues flagged by multiple models are high-confidence action items."
+            )
+
+            model_names = [r["model"] for r in multi_model_runs]
+
+            for category, label in [
+                ("security", "🔒 Security"),
+                ("bugs", "🐛 Bugs & Logic"),
+                ("style", "✏ Style"),
+                ("performance", "⚡ Performance"),
+            ]:
+                # Collect per-file: which models flagged issues
+                all_files = set()
+                for r in multi_model_runs:
+                    all_files.update(r.get("file_details", {}).keys())
+
+                flagged_files = []
+                for fname in sorted(all_files):
+                    models_flagging = []
+                    findings_by_model = {}
+                    for r in multi_model_runs:
+                        detail = r.get("file_details", {}).get(fname, {})
+                        text = detail.get(category, "")
+                        if not section_is_clean(text):
+                            models_flagging.append(r["model"])
+                            findings_by_model[r["model"]] = text
+                    if models_flagging:
+                        flagged_files.append((fname, models_flagging, findings_by_model))
+
+                if not flagged_files:
+                    continue
+
+                st.markdown(f"### {label}")
+                for fname, models_flagging, findings in flagged_files:
+                    agreement = len(models_flagging)
+                    total_models = len(multi_model_runs)
+
+                    if agreement == total_models:
+                        conf = "🔴 **All models agree**"
+                    elif agreement > 1:
+                        conf = f"🟡 **{agreement}/{total_models} models agree**"
+                    else:
+                        conf = f"⚪ **1 model only** ({models_flagging[0]})"
+
+                    with st.expander(f"`{fname}` — {conf}"):
+                        for model_name, text in findings.items():
+                            st.markdown(f"**{model_name}:**")
+                            st.markdown(text)
+                            st.markdown("---")
+
+            # Summary action items
+            st.markdown("### 📋 Priority Action Items")
+            action_items = []
+            all_files = set()
+            for r in multi_model_runs:
+                all_files.update(r.get("file_details", {}).keys())
+
+            for fname in sorted(all_files):
+                for category, emoji in [("security", "🔒"), ("bugs", "🐛")]:
+                    count = 0
+                    for r in multi_model_runs:
+                        detail = r.get("file_details", {}).get(fname, {})
+                        text = detail.get(category, "")
+                        if not section_is_clean(text):
+                            count += 1
+                    if count > 1:
+                        action_items.append(
+                            f"- {emoji} **`{fname}`** — {category} issue confirmed by "
+                            f"**{count}/{len(multi_model_runs)}** models"
+                        )
+                    elif count == 1:
+                        action_items.append(
+                            f"- {emoji} `{fname}` — {category} flagged by 1 model (review recommended)"
+                        )
+
+            if action_items:
+                st.markdown("\n".join(action_items))
+            else:
+                st.success("No security or bug issues flagged by any model.")
 
     def _render_section(tab, attr: str, empty_msg: str):
         with tab:
