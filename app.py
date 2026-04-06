@@ -98,10 +98,6 @@ with st.sidebar:
     )
 
     max_files = st.slider("Max files to review", 1, 50, 10)
-
-    st.divider()
-    history_width = st.slider("History panel width", 1, 4, 1, help="Wider = more room for scan history")
-
     run = st.button("Run Review", type="primary", use_container_width=True)
 
     st.divider()
@@ -114,7 +110,10 @@ with st.sidebar:
     )
 
 # ── Main layout: results (left) + history (right) ──────────────────────────
-main_col, history_col = st.columns([4, history_width])
+if "history_width" not in st.session_state:
+    st.session_state["history_width"] = 2
+history_width = st.session_state["history_width"]
+main_col, history_col = st.columns([6 - history_width, history_width])
 
 # ── Run review ──────────────────────────────────────────────────────────────
 if run and source:
@@ -208,20 +207,21 @@ if run and source:
 
 # ── History panel (right column) ────────────────────────────────────────────
 with history_col:
+    new_width = st.slider("◀ Panel width ▶", 1, 4, history_width, key="width_slider")
+    if new_width != history_width:
+        st.session_state["history_width"] = new_width
+        st.rerun()
+
     st.markdown("#### Scan History")
     history = st.session_state["history"]
     if not history:
         st.caption("No scans yet.")
     else:
         entries = list(reversed(list(history.values())))
-        if len(entries) > 1:
-            max_rows = st.slider("Rows shown", 1, len(entries), min(len(entries), 10), key="hist_rows")
-        else:
-            max_rows = 1
 
         header = "| Repo | Model | Score | Time | Files | When |\n|---|---|---|---|---|---|"
         rows = []
-        for entry in entries[:max_rows]:
+        for entry in entries:
             score_icon = "🟢" if entry["avg_score"] >= 7 else "🟡" if entry["avg_score"] >= 5 else "🔴"
             rows.append(
                 f"| {entry['source']} | {entry['model']} "
