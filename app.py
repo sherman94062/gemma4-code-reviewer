@@ -4,6 +4,7 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime
+from pathlib import PurePosixPath
 
 import streamlit as st
 from reviewer import (
@@ -67,19 +68,27 @@ def _format_elapsed(seconds: float) -> str:
     return f"{m}:{s:02d}" if m else f"{s}s"
 
 
-# Score regex: matches "7/10", "7 / 10", "7 out of 10", or a standalone
-# integer 1-10 near the word "score" context (already in the score section).
+# Score regex — ordered by specificity so we prefer explicit formats.
+# Group 1: "7/10", "7 / 10"
+# Group 2: "7 out of 10"
+# Group 3: fallback — standalone number preceded by score-like context
+#           (colon, bold, line start) to avoid capturing dates or file counts
 _SCORE_RE = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(?:/|out\s+of)\s*10"  # "7/10" or "7 out of 10"
+    r"(?P<slash>\d+(?:\.\d+)?)\s*/\s*10"
     r"|"
-    r"\b(\d+(?:\.\d+)?)\b"                      # fallback: any number
+    r"(?P<outof>\d+(?:\.\d+)?)\s+out\s+of\s+10"
+    r"|"
+    r"(?:^|[:\*\s])(?P<bare>[1-9](?:\.\d+)?|10(?:\.0)?)\s*(?:[/\s\-—.]|$)",
+    re.MULTILINE,
 )
 
 
 def _extract_score(score_text: str) -> float | None:
     """Extract a numeric score (1-10) from the score section text."""
     for m in _SCORE_RE.finditer(score_text):
-        val = m.group(1) or m.group(2)
+        val = m.group("slash") or m.group("outof") or m.group("bare")
+        if val is None:
+            continue
         try:
             s = float(val)
             if 1 <= s <= 10:
@@ -107,7 +116,7 @@ def _save_to_history(source: str, model_name: str, result: RepoReview, total_ela
             "summary": fr.summary,
         }
     avg = sum(scores_list) / len(scores_list) if scores_list else 0
-    display_name = source.rstrip("/").split("/")[-1]
+    display_name = PurePosixPath(source.rstrip("/")).name or source
     history_key = f"{source}||{model_name}"
     st.session_state["history"][history_key] = {
         "source": display_name,
@@ -124,9 +133,21 @@ def _save_to_history(source: str, model_name: str, result: RepoReview, total_ela
     }
 
 
-# ── Initialize history in session state ─────────────────────────────────────
-if "history" not in st.session_state:
-    st.session_state["history"] = {}
+# ── Initialize session state ─────────────────────────────────────────────────
+_SESSION_DEFAULTS = {
+    "history": {},
+    "history_width": 2,
+    "result": None,
+    "elapsed": 0.0,
+    "file_timings": [],
+    "model_used": "",
+    "synthesis": None,
+    "synthesis_source": None,
+    "synthesis_model": None,
+}
+for key, default in _SESSION_DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 # ── Sidebar: input ──────────────────────────────────────────────────────────
 with st.sidebar:
@@ -181,8 +202,6 @@ with st.sidebar:
     )
 
 # ── Main layout: results (left) + handle + history (right) ─────────────────
-if "history_width" not in st.session_state:
-    st.session_state["history_width"] = 2
 history_width = st.session_state["history_width"]
 main_col, handle_col, history_col = st.columns(
     [6 - history_width, 0.15, history_width],
@@ -501,7 +520,7 @@ with history_col:
             st.rerun()
 
 # ── Check for results to display ────────────────────────────────────────────
-if "result" not in st.session_state:
+if st.session_state["result"] is None:
     with main_col:
         st.info("Enter a GitHub URL or local path in the sidebar and click **Run Review**.")
     st.stop()
@@ -551,16 +570,16 @@ with main_col:
 
     # ── Category tabs ───────────────────────────────────────────────────────
     # Show Consensus tab when multiple models have scanned the same repo
-    current_source = st.session_state.get("result", RepoReview("")).repo_source
-    history = st.session_state.get("history", {})
+    current_source = result.repo_source
+    history = st.session_state["history"]
     multi_model_runs = [
         e for e in history.values()
         if e["full_source"] == current_source
     ]
     has_consensus = len(multi_model_runs) > 1
     has_synthesis = (
-        st.session_state.get("synthesis_source") == current_source
-        and "synthesis" in st.session_state
+        st.session_state["synthesis_source"] == current_source
+        and st.session_state["synthesis"] is not None
     )
 
     # Build tab list dynamically
