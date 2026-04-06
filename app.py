@@ -172,17 +172,18 @@ with history_col:
     if not history:
         st.caption("No scans yet.")
     else:
+        rows = []
         for entry in reversed(list(history.values())):
-            score_color = "🟢" if entry["avg_score"] >= 7 else "🟡" if entry["avg_score"] >= 5 else "🔴"
-            st.markdown(
-                f"**{entry['source']}**\n\n"
-                f"Model: `{entry['model']}`\n\n"
-                f"Time: {_format_elapsed(entry['elapsed'])}  •  "
-                f"Files: {entry['files']}\n\n"
-                f"Score: {score_color} {entry['avg_score']:.1f}/10\n\n"
-                f"_{entry['timestamp']}_"
-            )
-            st.divider()
+            score_icon = "🟢" if entry["avg_score"] >= 7 else "🟡" if entry["avg_score"] >= 5 else "🔴"
+            rows.append({
+                "Repo": entry["source"],
+                "Model": entry["model"],
+                "Score": f"{score_icon} {entry['avg_score']:.1f}",
+                "Time": _format_elapsed(entry["elapsed"]),
+                "Files": entry["files"],
+                "When": entry["timestamp"],
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
 
     if history:
         if st.button("Clear History", use_container_width=True):
