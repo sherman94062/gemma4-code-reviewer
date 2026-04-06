@@ -214,7 +214,10 @@ with history_col:
         st.caption("No scans yet.")
     else:
         entries = list(reversed(list(history.values())))
-        max_rows = st.slider("Rows shown", 1, max(len(entries), 1), min(len(entries), 10), key="hist_rows")
+        if len(entries) > 1:
+            max_rows = st.slider("Rows shown", 1, len(entries), min(len(entries), 10), key="hist_rows")
+        else:
+            max_rows = 1
 
         header = "| Repo | Model | Score | Time | Files | When |\n|---|---|---|---|---|---|"
         rows = []
