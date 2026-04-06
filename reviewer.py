@@ -3,13 +3,14 @@
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import ollama
 from git import Repo
 
-MODEL = "gemma4:26b"
+DEFAULT_MODEL = "gemma4:26b"
 
 # Patterns that indicate a section has no findings — LLMs vary their phrasing.
 _CLEAN_PATTERNS = re.compile(
@@ -75,6 +76,7 @@ class FileReview:
     score: str = ""
     raw: str = ""
     error: str = ""
+    elapsed: float = 0.0  # seconds to review this file
 
 
 @dataclass
@@ -209,17 +211,18 @@ def parse_review(raw: str) -> dict:
     return {k: v.strip() for k, v in sections.items()}
 
 
-def review_file(filepath: Path, root: Path) -> FileReview:
-    """Send a single file to Gemma 4 for review."""
+def review_file(filepath: Path, root: Path, model: str = DEFAULT_MODEL) -> FileReview:
+    """Send a single file to the selected model for review."""
     rel = str(filepath.relative_to(root))
     ext = filepath.suffix
     lang = language_from_ext(ext)
     code = filepath.read_text(errors="replace")
 
     fr = FileReview(filename=rel, language=lang)
+    t0 = time.time()
     try:
         response = ollama.chat(
-            model=MODEL,
+            model=model,
             messages=[{
                 "role": "user",
                 "content": REVIEW_PROMPT.format(
@@ -238,13 +241,36 @@ def review_file(filepath: Path, root: Path) -> FileReview:
         fr.score = parsed["score"]
     except Exception as e:
         fr.error = str(e)
+    fr.elapsed = time.time() - t0
     return fr
 
 
-def review_repo(source: str, max_files: int = 20, on_progress=None) -> RepoReview:
+def get_available_models() -> list[dict]:
+    """Return list of installed Ollama models with name and size in GB."""
+    models = []
+    for m in ollama.list().models:
+        size_gb = m.size / (1024 ** 3)
+        models.append({"name": m.model, "size_gb": size_gb})
+    # Sort smallest (fastest) first
+    models.sort(key=lambda x: x["size_gb"])
+    return models
+
+
+def speed_indicator(size_gb: float) -> str:
+    """Return a bolt-based speed indicator based on model size."""
+    if size_gb < 5:
+        return "⚡⚡⚡"
+    elif size_gb < 10:
+        return "⚡⚡"
+    else:
+        return "⚡"
+
+
+def review_repo(source: str, max_files: int = 20, model: str = DEFAULT_MODEL, on_progress=None) -> RepoReview:
     """Review a repo from a URL or local path. Returns a RepoReview.
 
     Args:
+        model: Ollama model name to use for reviews.
         on_progress: Optional callback(current_index, total, filename) called
                      before each file review starts.
 
@@ -276,7 +302,7 @@ def review_repo(source: str, max_files: int = 20, on_progress=None) -> RepoRevie
             rel = str(f.relative_to(root))
             if on_progress:
                 on_progress(i, total, rel)
-            fr = review_file(f, root)
+            fr = review_file(f, root, model=model)
             review.files_reviewed.append(fr)
 
         return review

@@ -3,13 +3,22 @@
 import time
 
 import streamlit as st
-from reviewer import review_repo, RepoReview, FileReview, section_is_clean
+from reviewer import (
+    review_repo, RepoReview, FileReview, section_is_clean,
+    get_available_models, speed_indicator,
+)
 
 st.set_page_config(page_title="Gemma 4 Code Reviewer", page_icon="🔍", layout="wide")
 
 # ── Header ──────────────────────────────────────────────────────────────────
 st.title("🔍 Gemma 4 Code Review Agent")
 st.caption("Local AI-powered code reviews — your code never leaves your machine.")
+
+
+def _format_elapsed(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}" if m else f"{s}s"
+
 
 # ── Sidebar: input ──────────────────────────────────────────────────────────
 with st.sidebar:
@@ -18,6 +27,35 @@ with st.sidebar:
         "GitHub URL or local path",
         placeholder="https://github.com/user/repo or /path/to/project",
     )
+
+    # Model selector with speed indicators
+    st.subheader("Model")
+    models = get_available_models()
+    if not models:
+        st.warning("No Ollama models found. Run `ollama pull <model>` first.")
+        st.stop()
+
+    model_options = [m["name"] for m in models]
+    model_labels = [
+        f"{m['name']}  {speed_indicator(m['size_gb'])}  ({m['size_gb']:.1f} GB)"
+        for m in models
+    ]
+    # Default to gemma4 if available, else first model
+    default_idx = 0
+    for i, name in enumerate(model_options):
+        if "gemma4" in name:
+            default_idx = i
+            break
+
+    selected_model = st.selectbox(
+        "Select model",
+        options=model_options,
+        index=default_idx,
+        format_func=lambda x: next(
+            lbl for opt, lbl in zip(model_options, model_labels) if opt == x
+        ),
+    )
+
     max_files = st.slider("Max files to review", 1, 50, 10)
     run = st.button("Run Review", type="primary", use_container_width=True)
 
@@ -26,29 +64,27 @@ with st.sidebar:
         "**How it works**\n"
         "1. Clones the repo (or reads local path)\n"
         "2. Extracts reviewable source files\n"
-        "3. Sends each file to **Gemma 4 27B** running locally via Ollama\n"
+        f"3. Sends each file to **{selected_model}** via Ollama\n"
         "4. Parses structured feedback into categories"
     )
 
 # ── Run review ──────────────────────────────────────────────────────────────
 if run and source:
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    # Live timer in the sidebar
-    with st.sidebar:
-        st.divider()
+    # Timer and progress at the top of the main area
+    timer_col, status_col = st.columns([1, 3])
+    with timer_col:
         timer_placeholder = st.empty()
+    with status_col:
+        status_text = st.empty()
+    progress_bar = st.progress(0)
+    timing_table = st.empty()
 
     start_time = time.time()
-
-    def _format_elapsed(seconds: float) -> str:
-        m, s = divmod(int(seconds), 60)
-        return f"{m}:{s:02d}" if m else f"{s}s"
+    file_timings: list[dict] = []
 
     def on_progress(current, total, filename):
         elapsed = time.time() - start_time
-        timer_placeholder.metric("Elapsed Time", _format_elapsed(elapsed))
+        timer_placeholder.metric("⏱ Elapsed", _format_elapsed(elapsed))
         if current == -1:
             status_text.markdown("**Cloning repository...**")
             progress_bar.progress(0)
@@ -60,24 +96,39 @@ if run and source:
             )
 
     try:
-        result: RepoReview = review_repo(source, max_files=max_files, on_progress=on_progress)
+        result: RepoReview = review_repo(
+            source, max_files=max_files, model=selected_model, on_progress=on_progress,
+        )
     except ValueError as e:
         progress_bar.empty()
         status_text.empty()
+        timer_placeholder.empty()
         st.error(f"**Invalid input:** {e}")
         st.stop()
     except Exception as e:
         progress_bar.empty()
         status_text.empty()
+        timer_placeholder.empty()
         st.error(f"**Review failed:** {e}")
         st.stop()
 
     total_elapsed = time.time() - start_time
-    timer_placeholder.metric("Total Time", _format_elapsed(total_elapsed))
+    timer_placeholder.metric("⏱ Total", _format_elapsed(total_elapsed))
     progress_bar.progress(1.0)
     status_text.markdown("**Review complete!**")
+
+    # Build per-file timing list
+    for fr in result.files_reviewed:
+        file_timings.append({
+            "File": fr.filename,
+            "Time": _format_elapsed(fr.elapsed),
+        })
+    file_timings.append({"File": "**Total**", "Time": f"**{_format_elapsed(total_elapsed)}**"})
+
     st.session_state["result"] = result
     st.session_state["elapsed"] = total_elapsed
+    st.session_state["file_timings"] = file_timings
+    st.session_state["model_used"] = selected_model
 
 if "result" not in st.session_state:
     st.info("Enter a GitHub URL or local path in the sidebar and click **Run Review**.")
@@ -85,10 +136,20 @@ if "result" not in st.session_state:
 
 result: RepoReview = st.session_state["result"]
 
-if "elapsed" in st.session_state:
-    with st.sidebar:
-        m, s = divmod(int(st.session_state["elapsed"]), 60)
-        st.metric("Total Time", f"{m}:{s:02d}" if m else f"{s}s")
+# ── Timing summary at top ───────────────────────────────────────────────────
+if "file_timings" in st.session_state:
+    with st.expander(
+        f"⏱ Scan times — **{_format_elapsed(st.session_state['elapsed'])}** total"
+        f"  ({st.session_state.get('model_used', '')})",
+        expanded=False,
+    ):
+        st.markdown(
+            "| File | Time |\n|---|---|\n"
+            + "\n".join(
+                f"| {t['File']} | {t['Time']} |"
+                for t in st.session_state["file_timings"]
+            )
+        )
 
 # ── Dashboard metrics ───────────────────────────────────────────────────────
 reviewed = result.files_reviewed
