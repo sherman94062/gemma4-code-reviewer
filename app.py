@@ -23,6 +23,37 @@ st.markdown("""
     h3 { margin-top: 0.5rem !important; margin-bottom: 0.25rem !important; }
     .stTabs [data-baseweb="tab-list"] { gap: 0.5rem; }
     .stProgress > div { margin-bottom: 0.25rem; }
+    /* Resize handle styling */
+    .resize-handle {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 200px;
+        cursor: col-resize;
+        opacity: 0.25;
+        transition: opacity 0.2s;
+        user-select: none;
+    }
+    .resize-handle:hover { opacity: 1.0; }
+    .resize-handle .grip {
+        font-size: 1.2rem;
+        color: #888;
+        letter-spacing: -2px;
+        padding: 8px 2px;
+        border-radius: 4px;
+        background: rgba(128,128,128,0.1);
+    }
+    .resize-handle:hover .grip {
+        background: rgba(128,128,128,0.25);
+        color: #ccc;
+    }
+    .resize-handle .arrows {
+        display: none;
+        gap: 2px;
+        margin-top: 4px;
+    }
+    .resize-handle:hover .arrows { display: flex; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -109,11 +140,14 @@ with st.sidebar:
         "4. Parses structured feedback into categories"
     )
 
-# ── Main layout: results (left) + history (right) ──────────────────────────
+# ── Main layout: results (left) + handle + history (right) ─────────────────
 if "history_width" not in st.session_state:
     st.session_state["history_width"] = 2
 history_width = st.session_state["history_width"]
-main_col, history_col = st.columns([6 - history_width, history_width])
+main_col, handle_col, history_col = st.columns(
+    [6 - history_width, 0.15, history_width],
+    gap="small",
+)
 
 # ── Run review ──────────────────────────────────────────────────────────────
 if run and source:
@@ -214,13 +248,26 @@ if run and source:
         "timestamp": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
     }
 
+# ── Resize handle (middle column) ───────────────────────────────────────────
+with handle_col:
+    st.markdown(
+        '<div class="resize-handle">'
+        '<div class="grip">⏐</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    left_btn, right_btn = st.columns(2)
+    with left_btn:
+        if st.button("◀", key="resize_left", use_container_width=True):
+            st.session_state["history_width"] = min(history_width + 1, 4)
+            st.rerun()
+    with right_btn:
+        if st.button("▶", key="resize_right", use_container_width=True):
+            st.session_state["history_width"] = max(history_width - 1, 1)
+            st.rerun()
+
 # ── History panel (right column) ────────────────────────────────────────────
 with history_col:
-    new_width = st.slider("◀ Panel width ▶", 1, 4, history_width, key="width_slider")
-    if new_width != history_width:
-        st.session_state["history_width"] = new_width
-        st.rerun()
-
     st.markdown("#### Scan History")
     history = st.session_state["history"]
     if not history:
