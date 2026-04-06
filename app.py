@@ -8,7 +8,7 @@ from datetime import datetime
 import streamlit as st
 from reviewer import (
     review_repo, RepoReview, FileReview, section_is_clean,
-    get_available_models, speed_indicator,
+    get_available_models, speed_indicator, synthesize_recommendations,
 )
 
 st.set_page_config(page_title="Gemma 4 Code Reviewer", page_icon="🔍", layout="wide")
@@ -89,6 +89,41 @@ def _extract_score(score_text: str) -> float | None:
     return None
 
 
+def _save_to_history(source: str, model_name: str, result: RepoReview, total_elapsed: float):
+    """Save a review result to session state history."""
+    file_scores = {}
+    file_details = {}
+    scores_list = []
+    for fr in result.files_reviewed:
+        s = _extract_score(fr.score)
+        file_scores[fr.filename] = s
+        if s is not None:
+            scores_list.append(s)
+        file_details[fr.filename] = {
+            "security": fr.security,
+            "bugs": fr.bugs,
+            "style": fr.style,
+            "performance": fr.performance,
+            "summary": fr.summary,
+        }
+    avg = sum(scores_list) / len(scores_list) if scores_list else 0
+    display_name = source.rstrip("/").split("/")[-1]
+    history_key = f"{source}||{model_name}"
+    st.session_state["history"][history_key] = {
+        "source": display_name,
+        "full_source": source,
+        "model": model_name,
+        "elapsed": total_elapsed,
+        "avg_score": avg,
+        "files": len(result.files_reviewed),
+        "security_flags": sum(1 for fr in result.files_reviewed if not section_is_clean(fr.security)),
+        "bug_flags": sum(1 for fr in result.files_reviewed if not section_is_clean(fr.bugs)),
+        "file_scores": file_scores,
+        "file_details": file_details,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
+    }
+
+
 # ── Initialize history in session state ─────────────────────────────────────
 if "history" not in st.session_state:
     st.session_state["history"] = {}
@@ -129,7 +164,12 @@ with st.sidebar:
     )
 
     max_files = st.slider("Max files to review", 1, 50, 10)
-    run = st.button("Run Review", type="primary", use_container_width=True)
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        run = st.button("Run Review", type="primary", use_container_width=True)
+    with btn_col2:
+        run_all = st.button("Run All Models", use_container_width=True,
+                            help="Run every installed model, then synthesize recommendations")
 
     st.divider()
     st.markdown(
@@ -216,37 +256,88 @@ if run and source:
     st.session_state["elapsed"] = total_elapsed
     st.session_state["file_timings"] = file_timings
     st.session_state["model_used"] = selected_model
+    _save_to_history(source, selected_model, result, total_elapsed)
 
-    # Build per-file detail breakdown for comparison and consensus
-    file_scores = {}
-    file_details = {}
-    for fr in result.files_reviewed:
-        s = _extract_score(fr.score)
-        file_scores[fr.filename] = s
-        file_details[fr.filename] = {
-            "security": fr.security,
-            "bugs": fr.bugs,
-            "style": fr.style,
-            "performance": fr.performance,
-            "summary": fr.summary,
-        }
+# ── Run All Models ──────────────────────────────────────────────────────────
+if run_all and source:
+    with main_col:
+        st.markdown("### Running all models...")
+        overall_progress = st.progress(0)
+        model_status = st.empty()
+        file_status = st.empty()
+        file_progress = st.progress(0)
 
-    # Update history — keyed by (source, model) so re-scans replace
-    display_name = source.rstrip("/").split("/")[-1]
-    history_key = f"{source}||{selected_model}"
-    st.session_state["history"][history_key] = {
-        "source": display_name,
-        "full_source": source,
-        "model": selected_model,
-        "elapsed": total_elapsed,
-        "avg_score": avg_for_hist,
-        "files": len(result.files_reviewed),
-        "security_flags": sum(1 for fr in result.files_reviewed if not section_is_clean(fr.security)),
-        "bug_flags": sum(1 for fr in result.files_reviewed if not section_is_clean(fr.bugs)),
-        "file_scores": file_scores,
-        "file_details": file_details,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
-    }
+    all_start = time.time()
+    total_models = len(model_options)
+    last_result = None
+
+    for mi, model_name in enumerate(model_options):
+        model_status.markdown(
+            f"**Model {mi + 1} of {total_models}:** `{model_name}`"
+        )
+        overall_progress.progress(mi / total_models)
+
+        model_start = time.time()
+
+        def on_progress_all(current, total, filename):
+            if current == -1:
+                file_status.markdown("Cloning repository...")
+                file_progress.progress(0)
+            else:
+                file_progress.progress(current / total)
+                file_status.markdown(
+                    f"  File {current + 1}/{total}: `{filename}`"
+                )
+
+        try:
+            result_i = review_repo(
+                source, max_files=max_files, model=model_name, on_progress=on_progress_all,
+            )
+        except Exception as e:
+            model_status.warning(f"**{model_name}** failed: {e}")
+            continue
+
+        model_elapsed = time.time() - model_start
+        _save_to_history(source, model_name, result_i, model_elapsed)
+        last_result = result_i
+
+    overall_progress.progress(1.0)
+    file_progress.progress(1.0)
+    total_all_elapsed = time.time() - all_start
+
+    if last_result:
+        st.session_state["result"] = last_result
+        st.session_state["elapsed"] = total_all_elapsed
+        st.session_state["model_used"] = "all models"
+        st.session_state["file_timings"] = [
+            {"File": fr.filename, "Time": _format_elapsed(fr.elapsed)}
+            for fr in last_result.files_reviewed
+        ] + [{"File": "**Total**", "Time": f"**{_format_elapsed(total_all_elapsed)}**"}]
+
+    # Synthesize recommendations using the largest model
+    model_status.markdown("**Synthesizing recommendations across all models...**")
+    file_status.empty()
+    file_progress.empty()
+
+    runs_for_source = [
+        e for e in st.session_state["history"].values()
+        if e["full_source"] == source
+    ]
+    # Use the largest model for synthesis (last in the sorted list)
+    best_model = model_options[-1]
+    try:
+        synthesis = synthesize_recommendations(runs_for_source, model=best_model)
+        st.session_state["synthesis"] = synthesis
+        st.session_state["synthesis_source"] = source
+        st.session_state["synthesis_model"] = best_model
+    except Exception as e:
+        st.session_state["synthesis"] = f"Synthesis failed: {e}"
+        st.session_state["synthesis_source"] = source
+
+    model_status.markdown(
+        f"**All {total_models} models complete!** "
+        f"Total time: {_format_elapsed(total_all_elapsed)}"
+    )
 
 # ── Resize handle (middle column) ───────────────────────────────────────────
 with handle_col:
@@ -422,16 +513,33 @@ with main_col:
         if e["full_source"] == current_source
     ]
     has_consensus = len(multi_model_runs) > 1
+    has_synthesis = (
+        st.session_state.get("synthesis_source") == current_source
+        and "synthesis" in st.session_state
+    )
 
+    # Build tab list dynamically
+    tab_names = ["Overview"]
     if has_consensus:
-        tab_overview, tab_consensus, tab_security, tab_bugs, tab_style, tab_perf, tab_raw = st.tabs(
-            ["Overview", "⚖ Consensus", "Security", "Bugs & Logic", "Style", "Performance", "Raw Output"]
-        )
-    else:
-        tab_overview, tab_security, tab_bugs, tab_style, tab_perf, tab_raw = st.tabs(
-            ["Overview", "Security", "Bugs & Logic", "Style", "Performance", "Raw Output"]
-        )
-        tab_consensus = None
+        tab_names.append("⚖ Consensus")
+    if has_synthesis:
+        tab_names.append("📋 Recommendations")
+    tab_names.extend(["Security", "Bugs & Logic", "Style", "Performance", "Raw Output"])
+
+    tabs = st.tabs(tab_names)
+    idx = 0
+    tab_overview = tabs[idx]; idx += 1
+    tab_consensus = tabs[idx] if has_consensus else None
+    if has_consensus:
+        idx += 1
+    tab_recommendations = tabs[idx] if has_synthesis else None
+    if has_synthesis:
+        idx += 1
+    tab_security = tabs[idx]; idx += 1
+    tab_bugs = tabs[idx]; idx += 1
+    tab_style = tabs[idx]; idx += 1
+    tab_perf = tabs[idx]; idx += 1
+    tab_raw = tabs[idx]
 
     def _file_icon(fr: FileReview) -> str:
         if fr.error:
@@ -539,6 +647,13 @@ with main_col:
                 st.markdown("\n".join(action_items))
             else:
                 st.success("No security or bug issues flagged by any model.")
+
+    # ── Recommendations tab ──────────────────────────────────────────────
+    if tab_recommendations is not None and has_synthesis:
+        with tab_recommendations:
+            synth_model = st.session_state.get("synthesis_model", "")
+            st.caption(f"Synthesized by **{synth_model}** from {len(multi_model_runs)} model runs")
+            st.markdown(st.session_state["synthesis"])
 
     def _render_section(tab, attr: str, empty_msg: str):
         with tab:

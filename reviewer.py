@@ -309,3 +309,71 @@ def review_repo(source: str, max_files: int = 20, model: str = DEFAULT_MODEL, on
     finally:
         if cleanup:
             shutil.rmtree(root, ignore_errors=True)
+
+
+SYNTHESIS_PROMPT = """\
+You are a senior software architect. Multiple AI code review models have independently \
+reviewed the same codebase. Below are their findings, organized by file and category.
+
+Your job is to:
+1. Identify which issues are **confirmed** (flagged by 2+ models) — these are high-priority.
+2. Identify which issues were flagged by only 1 model — assess whether they are likely real or false positives.
+3. Produce a **concrete, actionable list of recommended code changes**, ordered by priority.
+
+For each recommendation, include:
+- The file and what to change
+- Why it matters (security risk, bug, performance, etc.)
+- Confidence level: HIGH (multi-model agreement), MEDIUM (single model, looks real), LOW (possibly a false positive)
+
+At the end, give an overall assessment of the codebase quality and the top 3 things to fix first.
+
+Here are the findings from each model:
+
+{findings}
+
+Provide your response in clear markdown with these sections:
+## Recommended Changes
+Numbered list of specific, actionable changes.
+
+## Overall Assessment
+One paragraph summary of codebase quality.
+
+## Top 3 Priorities
+The three most important things to fix, in order.
+"""
+
+
+def synthesize_recommendations(all_runs: list[dict], model: str = DEFAULT_MODEL) -> str:
+    """Take findings from multiple model runs and synthesize actionable recommendations.
+
+    Args:
+        all_runs: List of history entry dicts (with file_details).
+        model: Which model to use for the synthesis (use the largest/best).
+
+    Returns:
+        Markdown string with recommendations.
+    """
+    # Build a structured summary of all findings
+    parts = []
+    for run in all_runs:
+        parts.append(f"### Model: {run['model']} (Score: {run['avg_score']:.1f}/10)")
+        for fname, details in run.get("file_details", {}).items():
+            file_parts = [f"**File: {fname}**"]
+            for cat in ("security", "bugs", "style", "performance"):
+                text = details.get(cat, "")
+                if not _CLEAN_PATTERNS.search(text) and text.strip():
+                    file_parts.append(f"- {cat.title()}: {text}")
+            if len(file_parts) > 1:
+                parts.append("\n".join(file_parts))
+        parts.append("")
+
+    findings = "\n\n".join(parts)
+
+    response = ollama.chat(
+        model=model,
+        messages=[{
+            "role": "user",
+            "content": SYNTHESIS_PROMPT.format(findings=findings),
+        }],
+    )
+    return response["message"]["content"]
