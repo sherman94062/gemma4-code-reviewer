@@ -1,5 +1,7 @@
 """Gemma 4 Code Review Agent — Streamlit UI."""
 
+import time
+
 import streamlit as st
 from reviewer import review_repo, RepoReview, FileReview, section_is_clean
 
@@ -33,9 +35,22 @@ if run and source:
     progress_bar = st.progress(0)
     status_text = st.empty()
 
+    # Live timer in the sidebar
+    with st.sidebar:
+        st.divider()
+        timer_placeholder = st.empty()
+
+    start_time = time.time()
+
+    def _format_elapsed(seconds: float) -> str:
+        m, s = divmod(int(seconds), 60)
+        return f"{m}:{s:02d}" if m else f"{s}s"
+
     def on_progress(current, total, filename):
+        elapsed = time.time() - start_time
+        timer_placeholder.metric("Elapsed Time", _format_elapsed(elapsed))
         if current == -1:
-            status_text.markdown(f"**Cloning repository...**")
+            status_text.markdown("**Cloning repository...**")
             progress_bar.progress(0)
         else:
             pct = current / total
@@ -57,15 +72,23 @@ if run and source:
         st.error(f"**Review failed:** {e}")
         st.stop()
 
+    total_elapsed = time.time() - start_time
+    timer_placeholder.metric("Total Time", _format_elapsed(total_elapsed))
     progress_bar.progress(1.0)
     status_text.markdown("**Review complete!**")
     st.session_state["result"] = result
+    st.session_state["elapsed"] = total_elapsed
 
 if "result" not in st.session_state:
     st.info("Enter a GitHub URL or local path in the sidebar and click **Run Review**.")
     st.stop()
 
 result: RepoReview = st.session_state["result"]
+
+if "elapsed" in st.session_state:
+    with st.sidebar:
+        m, s = divmod(int(st.session_state["elapsed"]), 60)
+        st.metric("Total Time", f"{m}:{s:02d}" if m else f"{s}s")
 
 # ── Dashboard metrics ───────────────────────────────────────────────────────
 reviewed = result.files_reviewed
