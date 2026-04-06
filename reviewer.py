@@ -176,10 +176,17 @@ def review_file(filepath: Path, root: Path) -> FileReview:
     return fr
 
 
-def review_repo(source: str, max_files: int = 20) -> RepoReview:
-    """Review a repo from a URL or local path. Returns a RepoReview."""
+def review_repo(source: str, max_files: int = 20, on_progress=None) -> RepoReview:
+    """Review a repo from a URL or local path. Returns a RepoReview.
+
+    Args:
+        on_progress: Optional callback(current_index, total, filename) called
+                     before each file review starts.
+    """
     cleanup = False
     if source.startswith("http://") or source.startswith("https://") or source.endswith(".git"):
+        if on_progress:
+            on_progress(-1, 0, "Cloning repository...")
         root = clone_repo(source)
         cleanup = True
     else:
@@ -187,9 +194,14 @@ def review_repo(source: str, max_files: int = 20) -> RepoReview:
 
     try:
         files, skipped = collect_files(root)
+        to_review = files[:max_files]
+        total = len(to_review)
         review = RepoReview(repo_source=source, files_skipped=skipped)
 
-        for f in files[:max_files]:
+        for i, f in enumerate(to_review):
+            rel = str(f.relative_to(root))
+            if on_progress:
+                on_progress(i, total, rel)
             fr = review_file(f, root)
             review.files_reviewed.append(fr)
 

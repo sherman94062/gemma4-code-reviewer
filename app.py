@@ -30,8 +30,24 @@ with st.sidebar:
 
 # ── Run review ──────────────────────────────────────────────────────────────
 if run and source:
-    with st.spinner("Reviewing code with Gemma 4 — this may take a few minutes..."):
-        result: RepoReview = review_repo(source, max_files=max_files)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    def on_progress(current, total, filename):
+        if current == -1:
+            status_text.markdown(f"**Cloning repository...**")
+            progress_bar.progress(0)
+        else:
+            pct = current / total
+            progress_bar.progress(pct)
+            status_text.markdown(
+                f"**Reviewing file {current + 1} of {total}:** `{filename}`"
+            )
+
+    result: RepoReview = review_repo(source, max_files=max_files, on_progress=on_progress)
+
+    progress_bar.progress(1.0)
+    status_text.markdown("**Review complete!**")
     st.session_state["result"] = result
 
 if "result" not in st.session_state:
